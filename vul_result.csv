@@ -1,0 +1,2426 @@
+id,代码入口,漏洞结果,对应代码
+128966,StHEU.setMigrationMode,"### Description of the Vulnerability:
+
+The identified vulnerability occurs in the `_calcClaimAmount` function. This vulnerability allows for the potential exploit where a user, during migration mode, can claim all their vested tokens immediately without waiting for the vesting period to complete.
+
+### Step-by-Step Exploit:
+
+1. **Activate Migration Mode**:
+   - The contract owner sets migrationMode to `true` via `setMigrationMode(true)`. This is intended to allow quicker access or additional functionality during migration operations.
+
+2. **User Vests Tokens**:
+   - Under normal circumstances when migration mode is `false`, the user calls the `vest(uint256 amount)` function, and their tokens are locked into a vesting schedule defined by `vestPeriod`.
+   - However, during migration mode (`migrationMode == true`), any tokens vested using the `vest(uint256 amount)` function have a period set to `0`, which means the vesting period essentially ends at the time it starts.
+
+3. **Immediate Claim**:
+   - Even though tokens are normally supposed to be vested for a certain period, during the migration mode, a user can immediately after vesting use the `claim(uint256 id)` function (note: actual `claim` function code not shown, but supposed it typically calls `_calcClaimAmount(id)`).
+   - The `_calcClaimAmount` function checks if `block.timestamp < info.end`. However, since `info.end == block.timestamp` (as set during the migration mode), this check passes without error.
+   - Consequently, the user can claim all their vested tokens right after vesting them, bypassing the expected lock-up period entirely.
+
+This creates a situation where the vesting period, which normally acts as a security and commitment mechanism, can be entirely circumvented when the migration mode is active. Additionally, if not correctly accounted for, this logic might be abused to perpetuate an attack that disrupts the system's tokenomics by releasing tokens into circulation faster than intended.","function setMigrationMode(bool status) external override onlyOwner {
+        migrationMode = status;
+
+        emit SetMigrationMode(status);
+    }
+function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        amount = info.amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+        if (block.timestamp < info.end && !migrationMode) {
+            revert StHEU__CanNotClaimEarlier();
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+    }
+function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert StHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+        uint256 period = migrationMode ? 0 : vestPeriod;
+
+        vestInfo[msg.sender][id] = VestInfo(amount, block.timestamp + period);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, period);
+    }
+function lock(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        if (migrationMode) {
+            revert StHEU__CanNotLockInMigrationMode();
+        }
+        if (amount == 0) {
+            revert StHEU__LockAmountIsInvalid();
+        }
+
+        uint256 mintAmount = amount * 1e18 / _exchangeRate();
+
+        heu.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, mintAmount);
+
+        emit Lock(amount, mintAmount);
+    }"
+128900,EsHEU.vest,"The identified vulnerability lies within the `_calcClaimAmount` function's handling of the penalty calculation and its subsequent addition to the `amount` variable. Let's walk through this step by step:
+
+### Description of the Vulnerability:
+
+1. The function `_calcClaimAmount` calculates the amount that a user can claim before the end of the vesting period (`info.end`). If a claim is made before the vesting period ends, a penalty is calculated on the unvested amount (the amount that is yet to be vested by the time of the claim). This penalty is intended to be deducted from the user's claim.
+
+2. However, instead of subtracting the penalty from the claimable amount, the code incorrectly adds the penalty to the claimable amount with the line `amount += penalty;`. This logic flaw turns the penalty into a bonus, increasing what the user can claim rather than reducing it.
+
+### Exploit Steps:
+
+Let's illustrate the exploit with a practical example:
+
+1. **Initial Vesting**: Assume a user vests an amount of 1000 tokens with a vestPeriod implying a future `end` timestamp.
+
+2. **Claim Before Vesting Period Ends**: The user decides to claim their vested tokens before the vesting period has fully elapsed. Let's assume the calculation based on the time elapsed should allow them to claim 500 out of the 1000 vested tokens. 
+
+3. **Penalty Calculation**: Instead of receiving a reduced amount due to early claim (penalty applied), let's say the penalty on the remaining unvested amount (500 tokens) is calculated as 100 tokens (this is a simplification for the sake of the explanation). According to the vulnerable logic in the function, this 100 tokens is added to the amount they can claim, creating a scenario where the user is now claiming 600 tokens instead of the 400 (500 - 100 penalty) they should receive.
+
+4. **Outcome**: By exploiting this logical bug, the user ends up with 100 tokens more than what they're entitled to due to early withdrawal, which contradicts the intended use of the penalty to deter early claims and ensure compliance with the vesting schedule.
+
+### Correction:
+
+To address this exploit, the line within `_calcClaimAmount` adding the penalty to the claim amount:
+```solidity
+amount += penalty;
+```
+Should be replaced or corrected to subtract the penalty from the vested amount that can be claimed at the point of early withdrawal:
+```solidity
+amount -= penalty;
+```
+or, if the intention was to calculate the net claimable amount before adding the penalty, ensure it's properly deducted from the claimable amount rather than added to it.
+
+### Conclusion:
+
+This exploit allows a user to beneficially claim more tokens than intended by misusing the penalty mechanism. Correcting this bug is crucial for maintaining the integrity of the vesting contract and ensuring penalties serve their purpose of deterring premature claims.","function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert EsHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+
+        vestInfo[msg.sender][id] =
+            VestInfo(amount, block.timestamp, block.timestamp + vestPeriod);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, vestPeriod);
+    }
+function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount, uint256 penalty)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        uint256 vestAmount = info.amount;
+
+        if (vestAmount == 0) {
+            revert EsHEU__NoVestForId();
+        }
+
+        if (block.timestamp >= info.end) {
+            amount = vestAmount;
+        } else {
+            amount = vestAmount * (block.timestamp - info.start)
+                / (info.end - info.start);
+            penalty = (vestAmount - amount) * penaltyMultiplier / 1e18;
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+
+        if (penalty > 0) {
+            amount += penalty;
+        }
+    }
+function cancelVest(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        uint256 amount = vestInfo[msg.sender][id].amount;
+
+        if (amount == 0) {
+            revert EsHEU__NoVestForId();
+        }
+
+        _transfer(address(this), msg.sender, amount);
+
+        delete vestInfo[msg.sender][id];
+
+        emit CancelVest(id, amount);
+    }
+function _exchangeRate() internal view returns (uint256) {
+        uint256 totalHEU = heu.balanceOf(address(this));
+        uint256 totalSupply = totalSupply();
+
+        if (totalHEU == 0 || totalSupply == 0) {
+            return 1e18;
+        }
+
+        return totalHEU * 1e18 / totalSupply;
+    }
+function claim(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 amount, uint256 heuAmount, uint256 penalty)
+    {
+        (amount, heuAmount, penalty) = _calcClaimAmount(id);
+
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        if (info.amount > amount) {
+            info.amount -= amount;
+            info.start = block.timestamp;
+        } else {
+            delete vestInfo[msg.sender][id];
+        }
+
+        heu.safeTransfer(msg.sender, heuAmount);
+        _burn(address(this), amount);
+
+        emit Claim(id, amount, heuAmount, penalty);
+    }"
+128954,StHEU.unpause,"The vulnerability in the code lies within the `_exchangeRate()` function and how this rate is applied differently in vesting (`vest()`) vs locking (`lock()`) functions, combined with how `claim()` computes the HEU amount to be transferred back to the user. This could result in an exploitable scenario where an attacker benefits disproportionally from vesting and claiming back, thereby draining more HEU than they should be entitled to.
+
+### The Vulnerability: Disproportionate Exchange Rate Application
+
+1. **_ExchangeRate Calculation Logic_:** The `_exchangeRate()` function calculates the exchange rate based on the total HEU balance of the contract divided by its total supply. This exchange rate aims to ensure that operations like locking and vesting are equitable in value transacted vs. value received.
+
+2. **_Lock vs. Vest Exchange Rate Application_:** The `lock()` function uses the exchange rate to determine the amount of minted HEU based on the HEU locked. Conversely, the `vest()` function does not apply the exchange rate when recording the vested amount. Instead, it records the plain HEU amount and applies the exchange rate in the opposite direction during `claim()`, potentially returning a different amount of HEU to the user based on the current exchange rate.
+
+### Step-by-Step Exploitation
+
+1. **Initial State**: Suppose the exchange rate is favorable because the total supply is low compared to the HEU balance of the contract. This scenario portrays a higher valuation of each internal token compared to the base HEU.
+
+2. **Perform Vesting**: The attacker vests a significant amount of HEU using `vest()`. This action doesn't immediately convert or evaluate the HEU based on the current exchange rate. Instead, it merely records the vested amount.
+
+3. **Manipulate Exchange Rate**: The attacker then either waits for or directly influences (through other users or their assets) substantial locking (`lock()`) actions by others, increasing the total supply without equivalently increasing the total HEU balance. This scenario depresses the exchange rate (more supply vs. HEU balance).
+
+4. **Claim with Advantage**: After the exchange rate is depressed, the attacker proceeds to `claim()` their vested amount. Given the lower exchange rate, the claimed HEU amount could be significantly higher than what was originally vested, exploiting the difference induced by the intervening actions.
+
+### Explanation
+
+This scenario capitalizes on the time-variable nature of exchange rates and their asymmetric application to vesting and claiming processes. By entering a vest agreement under one rate and exiting under another more favorable one due to intervening supply manipulations, attackers could siphon off more HEU from the contract than the equivalent value of what they initially vested.
+
+To correct this vulnerability, a consistent application of exchange rates or locking in the exchange rate at the vesting time could be implemented to ensure that the HEU amount returned is always proportionate to the initial amount vested, considering the rate at the time of vesting, not at the time of claiming.","function unpause() external override onlyOwner {
+        _unpause();
+    }
+function lock(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        if (migrationMode) {
+            revert StHEU__CanNotLockInMigrationMode();
+        }
+        if (amount == 0) {
+            revert StHEU__LockAmountIsInvalid();
+        }
+
+        uint256 mintAmount = amount * 1e18 / _exchangeRate();
+
+        heu.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, mintAmount);
+
+        emit Lock(amount, mintAmount);
+    }
+function claimableAmount(uint256 id)
+        external
+        view
+        override
+        returns (uint256 heuAmount)
+    {
+        (, heuAmount) = _calcClaimAmount(id);
+    }
+function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert StHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+        uint256 period = migrationMode ? 0 : vestPeriod;
+
+        vestInfo[msg.sender][id] = VestInfo(amount, block.timestamp + period);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, period);
+    }
+function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        amount = info.amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+        if (block.timestamp < info.end && !migrationMode) {
+            revert StHEU__CanNotClaimEarlier();
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+    }
+function cancelVest(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        uint256 amount = vestInfo[msg.sender][id].amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+
+        _transfer(address(this), msg.sender, amount);
+
+        delete vestInfo[msg.sender][id];
+
+        emit CancelVest(id, amount);
+    }
+function _exchangeRate() internal view returns (uint256) {
+        uint256 totalHEU = heu.balanceOf(address(this));
+        uint256 totalSupply = totalSupply();
+
+        if (totalHEU == 0 || totalSupply == 0) {
+            return 1e18;
+        }
+
+        return totalHEU * 1e18 / totalSupply;
+    }
+function claim(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 heuAmount)
+    {
+        uint256 amount;
+
+        (amount, heuAmount) = _calcClaimAmount(id);
+
+        delete vestInfo[msg.sender][id];
+
+        heu.safeTransfer(msg.sender, heuAmount);
+        _burn(address(this), amount);
+
+        emit Claim(id, heuAmount);
+    }
+function exchangeRate() external view override returns (uint256) {
+        return _exchangeRate();
+    }"
+129032,StHEU.claimableAmount,"The vulnerability in the code lies within the `_exchangeRate()` function and its interaction with `totalSupply`, which can be exploited through an economic attack known as the ""flash loan attack"". The specific logical vulnerability is the calculation of the exchange rate based on the contract's balance (`totalHEU`) and its `totalSupply`. An attacker can inflate the contract's balance temporarily to manipulate the exchange rate in their favor.
+
+### Vulnerability Detail
+
+The `_exchangeRate()` function calculates the exchange rate as `totalHEU * 1e18 / totalSupply`. It's intended to return how much HEU one can get per token of the total supply. This mechanism assumes the `totalHEU` and `totalSupply` are relatively stable during the transaction. However, `totalHEU` can be artificially inflated by depositing a large amount of HEU tokens into the contract just before calling a function that relies on the `_exchangeRate()` calculation and then withdrawing right after the calculation. This manipulation significantly increases the exchange rate, allowing the attacker to claim a disproportionately high amount of HEU when calling `claimableAmount(id)`.
+
+### Step-by-Step Exploit
+
+1. **Preparation**: The attacker acquires a large amount of HEU tokens via a flash loan. Flash loans are borrowed and repaid within the same transaction and are a well-known tool for executing such economic attacks.
+   
+2. **Inflation of `totalHEU`**: Right before calling `claimableAmount(id)`, the attacker sends the borrowed HEU to the contract. This increases `totalHEU` greatly but does not directly affect `totalSupply`.
+
+3. **Calling `claimableAmount(id)`**: With the inflated `totalHEU`, the attacker then calls `claimableAmount(id)`. The function internally calls `_calcClaimAmount()` which calculates `heuAmount` based on the temporarily inflated exchange rate from `_exchangeRate()`.
+
+4. **Disproportionate Claim**: Due to the manipulated exchange rate, the claim for the attacker is calculated with a higher value, enabling them to withdraw more HEU from the contract than they are rightfully owed in relation to their original participation or contribution.
+
+5. **Repaying the Flash Loan and Profit Extraction**: The attacker withdraws the claimed HEU, repays the flash loan, and keeps the excess HEU as a profit, exploiting the contract at the expense of other participants.
+
+### Correction
+
+To mitigate this exploit, the contract needs to ensure the exchange rate calculation is less susceptible to manipulation through sudden changes in `totalHEU`. One approach is to use a time-weighted average price (TWAP) mechanism for calculating the exchange rate, where the rate is not determined by the immediate `totalHEU` but by an average over a certain period. Alternatively, limiting the ability to deposit or withdraw HEU in such a way that affects `totalHEU` around critical calculations could also reduce exploitability. It's also critical to review all external calls that may allow for unintentional interactions, such as receiving tokens, to ensure they do not open up manipulation vectors.","function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        amount = info.amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+        if (block.timestamp < info.end && !migrationMode) {
+            revert StHEU__CanNotClaimEarlier();
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+    }
+function _exchangeRate() internal view returns (uint256) {
+        uint256 totalHEU = heu.balanceOf(address(this));
+        uint256 totalSupply = totalSupply();
+
+        if (totalHEU == 0 || totalSupply == 0) {
+            return 1e18;
+        }
+
+        return totalHEU * 1e18 / totalSupply;
+    }
+function claimableAmount(uint256 id)
+        external
+        view
+        override
+        returns (uint256 heuAmount)
+    {
+        (, heuAmount) = _calcClaimAmount(id);
+    }"
+129086,Staking.setMinimumStake,"The vulnerability resides in the `distribute` function, specifically in the calculation of `accTokenPerShare[token]` which could be exploited by an attacker to artificially inflate the rewards they are eligible to receive. This is a logical bug that can be exploited due to improper calculation of per share value, resulting in an incorrect increase in the accumulated token per share (`accTokenPerShare`) without an appropriate increase in total staked amount, leading to disproportionate rewards relative to the stake.
+
+### Detailed Exploit Steps:
+
+1. **Initial Setup**: An attacker starts by staking a minimal amount in a miner, just enough to pass the `minimumStake` check. Let's say the `minimumStake` is 100 tokens, and the attacker stakes exactly 100 tokens.
+
+2. **Exploitation Phase**: The attacker, through another address or collaboration, triggers a distribute call with a significant amount of tokens (let's denote this amount as `X tokens`) to the miner where they have staked their 100 tokens. However, this time they include a very high `bribe` amount which is significantly larger than usual. Given the formula for `bribeReward` calculation is `(amount * bribe / 1e18)`, by setting `bribe` way higher than the normalized limit (e.g., setting `bribe` to values resulting in `bribeReward` being almost equal to `amount`) ensures almost all of the distributed `X tokens` are considered as `bribeReward`.
+
+3. **Manipulation of AccTokenPerShare**: Due to the high `bribeReward`, the increment of `miner.accTokenPerShare[token]` becomes substantial (`bribeReward * 1e18 / miner.amount`). Remember, `miner.amount` didn't increase much because our attacker only staked a minimal amount. The high `bribeReward` would lead to a disproportionate increase in `accTokenPerShare`, making this value extremely large relative to the actual per-share amount that should be assigned to each staked token.
+
+4. **Harvesting the Rewards**: The attacker now unstakes their tokens. Due to the inflated `accTokenPerShare[token]`, the rewards calculated for the attacker would be significantly higher than what they should be entitled to based on the actual amount they staked. This happens because `user.rewardDebt[token]` on unstaking will subtract a much larger value (`amount * miner.accTokenPerShare[token] / 1e18`), leading to the user receiving an outsized portion of the distributed tokens as rewards.
+
+### Conclusion:
+
+The described vulnerability allows an attacker to manipulate the distribution of rewards by inflating `accTokenPerShare[token]` through strategic staking and inducing a distribution call with a disproportionately high `bribe`. This results in the attacker receiving more tokens as rewards than their fair share related to the staked amount, to the detriment of the other participants who have staked in the system genuinely. Fixing this requires adjusting the distribution logic to ensure `accTokenPerShare[token]` accurately represents the amount each token staked is entitled to in rewards, possibly by incorporating checks against unreasonable `bribe` inputs or recalculating distribution based on a more equitable formula.","function setMinimumStake(uint256 newMinimumStake)
+        external
+        override
+        onlyOwner
+    {
+        minimumStake = newMinimumStake;
+
+        emit SetMinimumStake(newMinimumStake);
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }
+function distribute(
+        address token,
+        bytes32[] calldata minerIds,
+        uint256[] calldata amounts
+    ) external override onlyOwner nonReentrant {
+        uint256 numMinerIds = minerIds.length;
+        uint256 totalAmount;
+        uint256 amount;
+        uint256 bribe;
+
+        for (uint256 i = 0; i < numMinerIds; ++i) {
+            MinerInfo storage miner = minerInfo[minerIds[i]];
+
+            if (miner.amount < minimumStake) {
+                continue;
+            }
+
+            amount = amounts[i];
+
+            bribe = miner.bribe;
+
+            if (bribe < minimumBribe) {
+                bribe = minimumBribe;
+            }
+
+            uint256 bribeReward = amount * bribe / 1e18;
+
+            miner.reward[token] += (amount - bribeReward);
+            miner.bribedReward[token] += bribeReward;
+            miner.accTokenPerShare[token] += bribeReward * 1e18 / miner.amount;
+
+            totalAmount += amount;
+        }
+
+        if (!isRewardToken[token]) {
+            isRewardToken[token] = true;
+            rewardTokens.push(token);
+        }
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        emit Distribute(token, minerIds, amounts);
+    }
+function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }"
+129114,Staking.register,"The vulnerability lies within the handling of `rewardDebt` in `claimStakerReward` and the calculation in `pendingReward`. Specifically, the issue is that `rewardDebt` for a user is updated to `accumulatedToken` after they claim their staking rewards, but the calculation of rewards does not consider the potential update in `rewardDebt` between the claim transactions, allowing for an exploit where a user can claim more rewards than they are entitled to by manipulating the timing of their claims.
+
+### Vulnerability Detail:
+
+The logic flaw revolves around `rewardDebt`, which is intended to track the amount of rewards already accounted for the staker, so they only receive the new rewards generated since their last claim. However, the calculation in `claimStakerReward` function sets the user's `rewardDebt` to their `accumulatedToken` at the time of their claim. 
+
+This becomes a problem due to how rewards are calculated:
+
+```solidity
+uint256 reward = uint256(accumulatedToken - user.rewardDebt[token]);
+```
+
+And then `rewardDebt` is set to:
+
+```solidity
+user.rewardDebt[token] = accumulatedToken;
+```
+
+This calculation assumes that the staker hasn't made any changes that would affect their `accumulatedToken` between claims, which isn't always true.
+
+### Exploit Steps:
+
+1. **Accrue Rewards**: A staker stakes a certain amount and waits for some rewards to accrue.
+2. **Initial Claim**: They claim their rewards, which updates their `rewardDebt` to `accumulatedToken`.
+3. **Additional Staking**: Before new rewards accrue and increase `accTokenPerShare`, they stake an additional amount, increasing their `user.amount` but not affecting their already updated `rewardDebt`.
+4. **Second Claim**: When they claim again, the reward calculation considers the increased `user.amount` but compares it with a `rewardDebt` based on the old `user.amount`. This results in the user claiming rewards as if they had been staking the larger amount for the entire period, not just after the first claim.
+
+### Consequence:
+
+By timing their stakes and claims around reward accumulation periods, a user could unfairly increase their rewards at the expense of the rest of the pool, essentially double-dipping into the rewards distribution. This could lead to inflated rewards for some users, draining the reward pool faster than intended, and disadvantaging other honest users in the pool.
+
+### Solution:
+
+One way to mitigate this vulnerability is to ensure that `rewardDebt` is adjusted appropriately whenever a user's stake amount changes, not just when rewards are claimed. A potential solution is to update `rewardDebt` upon any staking activity as well (both stakes and unstakes), ensuring that it always accurately represents the amount of rewards already accounted for given the user's current stake. This would prevent users from exploiting the timing of stake increases to claim more rewards than they are due. Moreover, introducing a mechanism to track the timestamp of last reward claim and incorporating it into the reward calculation could further ensure fair reward distribution among participants.","function bribedReward(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].bribedReward[token];
+    }
+function minerReward(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].reward[token];
+    }
+function claimMinerReward(
+        bytes12 gpuId,
+        address token
+    ) external override whenNotPaused nonReentrant {
+        bytes32 minerId = _getMinerId(msg.sender, gpuId);
+        MinerInfo storage miner = minerInfo[minerId];
+
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        uint256 reward = miner.reward[token];
+
+        if (reward == 0) {
+            revert Staking__NotEnoughRewardForMiner(msg.sender, gpuId, token);
+        }
+
+        IERC20(token).safeTransfer(msg.sender, reward);
+        miner.reward[token] = 0;
+
+        emit ClaimMinerReward(msg.sender, gpuId, token, reward);
+    }
+function unstake(
+        bytes32 minerId,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _unstake(minerId, amount, false);
+    }
+function claimStakerReward(
+        bytes32 minerId,
+        address token
+    ) external override whenNotPaused nonReentrant {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+
+        int256 accumulatedToken = int256(
+            user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+        );
+        uint256 reward = uint256(accumulatedToken - user.rewardDebt[token]);
+
+        if (reward == 0) {
+            revert Staking__NotEnoughRewardForStaker(
+                msg.sender, minerId, token
+            );
+        }
+
+        user.rewardDebt[token] = accumulatedToken;
+
+        IERC20(token).safeTransfer(msg.sender, reward);
+
+        emit ClaimStakerReward(msg.sender, minerId, token, reward);
+    }
+function restake(
+        bytes32 from,
+        bytes32 to,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _unstake(from, amount, true);
+        _stake(to, amount, true);
+    }
+function register(bytes12 gpuId) external override {
+        bytes32 minerId = _getMinerId(msg.sender, gpuId);
+
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (miner.account != address(0)) {
+            revert Staking__MinerIsAlreadyRegistered();
+        }
+
+        miner.account = msg.sender;
+        miner.gpuId = gpuId;
+
+        emit Register(msg.sender, gpuId);
+    }
+function pendingReward(
+        address account,
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[account][minerId];
+
+        return uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+    }
+function stake(
+        bytes32 minerId,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _stake(minerId, amount, false);
+    }
+function accTokenPerShare(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].accTokenPerShare[token];
+    }"
+129130,Staking.stake,"**Vulnerability Description:**
+
+The vulnerability present in this staking contract arises from the incorrect handling of accumulated rewards per share during multiple stakes by users within the same block, before the update of `miner.accTokenPerShare[token]` to reflect new total staked amounts.
+
+In function `_stake()`, the user's `rewardDebt[token]` is increased based on the current `miner.accTokenPerShare[token]`. When multiple stakeholders call `stake()` in the same block, before any mechanism to update `miner.accTokenPerShare[token]` (which is typically adjusted in a distributing rewards function calling another method not shown here), each staker's `rewardDebt` is computed on the same `accTokenPerShare[token]` value even though `miner.amount` is increased with each stake in that block.
+
+This mismatch means that users staking later in the same block benefit unfairly from an artificially lower `rewardDebt[token]` relative to the amount they should accumulate based on the total increased staked amount, enabling them to claim more rewards than they are due when rewards are later distributed and `miner.accTokenPerShare[token]` updated.
+
+**Step-by-Step Exploitation:**
+
+1. **Tracking a Vulnerable Moment**: An attacker keeps track of the staking activities occurring within a single block. The vulnerability is particularly exploitable when one or more stakes occur before the attacker's transaction within the same block.
+
+2. **Stake During High Activity**: The attacker waits for a moment when multiple stakeholders are interacting with the `stake` function in the same block, with others already having increased the `miner.amount` but before any update to the `miner.accTokenPerShare[token]`.
+
+3. **Execute the Stake**: The attacker then calls the `stake` function, contributing an amount to the staking pool. Since `rewardDebt` is being updated based on the old `miner.accTokenPerShare[token]` that does not yet reflect the total new staked amount, the attacker essentially locks in a lower-than-accurate `rewardDebt`.
+
+4. **Benefitting from Inaccurate Reward Debt Calculation**: Because of staking during this skewed moment, the attacker’s reward debt does not represent the accurate amount according to total stakes. When future reward distributions occur (assuming a function updates `miner.accTokenPerShare[token]` eventually), the attacker will receive more rewards than due because their debt was calculated on an inappropriately low `accTokenPerShare` basis.
+
+This exploitation allows the attacker to unfairly glean more tokens from the reward pool during distributions, decreasing the share other honest participants receive. The vulnerability seizes on the lack of real-time updating in `accTokenPerShare` during high-frequency staking within the same block. It challenges the fairness and integrity of the staking reward distribution mechanism, making it a critical logic error to address.","function stake(
+        bytes32 minerId,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _stake(minerId, amount, false);
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }"
+129146,Staking.restake,"The critical exploitable vulnerability in the provided code snippet lies within the `_unstake` and `_stake` functions, specifically in the manner by which `rewardDebt` is updated. The vulnerability is tied to an incorrect adjustment of a user's `rewardDebt` upon unstaking and restaking, enabling a potential exploit that manipulates the distribution of reward tokens.
+
+### Detailed Vulnerability Description
+
+The vulnerability is rooted in the arithmetic operations involving `rewardDebt`. When unstaking and restaking, the user's `rewardDebt` is recalculated without proper scaling, particularly missing the division by `1e18` during the `_stake` operation, as seen in the `_unstake` function. This inconsistency can be exploited to artificially inflate the user's rewards.
+
+### Steps to Exploit the Vulnerability
+
+1. **Initiate Staking:** The attacker first stakes a certain amount into the contract, registering their `minerId` and establishing an initial `rewardDebt` based on the `accTokenPerShare` at the time of staking.
+   
+2. **Accumulate Rewards:** Over time, as the `accTokenPerShare` increases (due to token accumulation mechanisms not detailed in the snippet), the attacker's potential reward, as implied by their `rewardDebt`, also increases.
+
+3. **Unstake:** The attacker decides to unstake their tokens. During this process, their `rewardDebt` is reduced correctly, with subtraction involving the operation `amount * miner.accTokenPerShare[token] / 1e18`. This correctly adjusts their `rewardDebt` in line with the amount unstaked.
+
+4. **Immediate Restake:** Without actual withdrawal (choosing the `isRestaking` flag as `true`), the attacker restakes the same amount. However, during this operation, when the `rewardDebt` is recalculated, the code simply multiplies `amount * miner.accTokenPerShare[token]` without the division by `1e18`, leading to a significant discrepancy.
+
+5. **Exploiting the Discrepancy:** By repeatedly executing this unstake and restake operation, the attacker can inflate their `rewardDebt` without actual contribution equivalent to the inflated `rewardDebt`. This discrepancy creates a situation where the attacker appears to be owed more rewards than they are rightfully due, based on the tokens they've staked.
+
+6. **Claiming Inflated Rewards:** Eventually, when rewards are distributed or claimed based on the `rewardDebt`, the attacker can potentially claim a disproportionately large amount of the reward tokens, to the detriment of the system and other stakers.
+
+### Correction to Mitigate the Vulnerability
+
+To rectify this vulnerability, the `_stake` function must be adjusted to ensure the arithmetic operation on `rewardDebt` is consistent with that in the `_unstake` function, preserving the scale of calculations across both functions. Specifically, the line in `_stake`:
+
+```solidity
+user.rewardDebt[token] += int256(amount * miner.accTokenPerShare[token]);
+```
+
+Should be amended to match the division by `1e18` as in `_unstake`, ensuring consistent and fair computation of `rewardDebt`:
+
+```solidity
+user.rewardDebt[token] += int256(amount * miner.accTokenPerShare[token] / 1e18);
+```
+
+This change prevents the exploitation mechanism by ensuring that the reward debt remains consistent and proportional to the actual staked amount and the accrual rate of the reward tokens, thus securing the staking and reward distribution operations from being manipulated.","function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }
+function restake(
+        bytes32 from,
+        bytes32 to,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _unstake(from, amount, true);
+        _stake(to, amount, true);
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }"
+129156,Staking.distribute,"### Vulnerability Description
+
+The exploitable logical vulnerability in the provided code snippet lies within the `distribute` function, specifically in the method used to calculate and update the `accTokenPerShare` for each miner. This vulnerability centers around the incorrect calculation and updating of `accTokenPerShare` based on the `bribeReward` rather than the total rewarded amount adjusted for the `bribeReward`.
+
+### Steps to Exploit the Vulnerability
+
+1. **Understanding the Code Logic**: When distribution of rewards is initiated through the `distribute` function, part of the distribution is allocated as a `bribeReward` based on the miner's `bribe`, which is intended to incentivize certain behaviors or stake amounts. The problematic part is that `accTokenPerShare` is updated using only the `bribeReward` amount instead of the total effective reward after distributing the `bribeReward`.
+
+2. **Exploitation Begin**: An attacker observes or controls a miner with a considerable stake amount and minimal but non-zero `bribe` amount to ensure `bribeReward` calculation takes place.
+
+3. **Performing the Distribution**: When the `distribute` function is executed, rewards are split between the actual reward and the `bribeReward`. However, due to the logical flaw, `accTokenPerShare` is updated with `bribeReward * 1e18 / miner.amount`. This incorrect update significantly inflates the `accTokenPerShare` value since it does not represent the total rewards (minus `bribeReward`) accurately distributed to miners and allocated for calculating future payouts.
+
+4. **Exploiting the Flaw**: The attacker or a miner could claim an exaggerated amount of rewards based on the inflated `accTokenPerShare`. Since `accTokenPerShare` is used to calculate the pending rewards and determines the amount transferred upon claiming, this incorrect update allows miners to potentially claim more rewards than they should, depleting the contract's token reserves unduly.
+
+### Exploitation Outcome
+
+By using the inflated `accTokenPerShare`, an attacker unintentionally benefits from an inaccurate calculation of pending rewards, leading to unjust enrichment at the cost of the contract's integrity and potentially diluting the rewards intended for other rightful participants. This exploitative outcome undermines the fair and proportional distribution of rewards among participating miners, based on their respective stakes and contributions.
+
+### Correcting the Logical Vulnerability
+
+The core correction needed in the contract's logic involves accurately calculating the `accTokenPerShare` value by ensuring it reflects the total rewards intended for distribution among miners, adjusted for any `bribeReward`. The corrected line of code should subtract the `bribeReward` from the total `amount` before updating `accTokenPerShare`:
+
+```solidity
+// Correcting the distribution calculation to factor in the total amount 
+// minus bribeReward effectively before updating accTokenPerShare
+miner.accTokenPerShare[token] += (amount - bribeReward) * 1e18 / miner.amount;
+```
+
+This correction ensures that the accumulation of tokens per share accurately reflects the total rewards distributed to miners, maintaining the integrity of the rewards mechanism and fairness among participating stakeholders.","function bribedReward(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].bribedReward[token];
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function minerReward(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].reward[token];
+    }
+function claimMinerReward(
+        bytes12 gpuId,
+        address token
+    ) external override whenNotPaused nonReentrant {
+        bytes32 minerId = _getMinerId(msg.sender, gpuId);
+        MinerInfo storage miner = minerInfo[minerId];
+
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        uint256 reward = miner.reward[token];
+
+        if (reward == 0) {
+            revert Staking__NotEnoughRewardForMiner(msg.sender, gpuId, token);
+        }
+
+        IERC20(token).safeTransfer(msg.sender, reward);
+        miner.reward[token] = 0;
+
+        emit ClaimMinerReward(msg.sender, gpuId, token, reward);
+    }
+function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }
+function claimStakerReward(
+        bytes32 minerId,
+        address token
+    ) external override whenNotPaused nonReentrant {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+
+        int256 accumulatedToken = int256(
+            user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+        );
+        uint256 reward = uint256(accumulatedToken - user.rewardDebt[token]);
+
+        if (reward == 0) {
+            revert Staking__NotEnoughRewardForStaker(
+                msg.sender, minerId, token
+            );
+        }
+
+        user.rewardDebt[token] = accumulatedToken;
+
+        IERC20(token).safeTransfer(msg.sender, reward);
+
+        emit ClaimStakerReward(msg.sender, minerId, token, reward);
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }
+function distribute(
+        address token,
+        bytes32[] calldata minerIds,
+        uint256[] calldata amounts
+    ) external override onlyOwner nonReentrant {
+        uint256 numMinerIds = minerIds.length;
+        uint256 totalAmount;
+        uint256 amount;
+        uint256 bribe;
+
+        for (uint256 i = 0; i < numMinerIds; ++i) {
+            MinerInfo storage miner = minerInfo[minerIds[i]];
+
+            if (miner.amount < minimumStake) {
+                continue;
+            }
+
+            amount = amounts[i];
+
+            bribe = miner.bribe;
+
+            if (bribe < minimumBribe) {
+                bribe = minimumBribe;
+            }
+
+            uint256 bribeReward = amount * bribe / 1e18;
+
+            miner.reward[token] += (amount - bribeReward);
+            miner.bribedReward[token] += bribeReward;
+            miner.accTokenPerShare[token] += bribeReward * 1e18 / miner.amount;
+
+            totalAmount += amount;
+        }
+
+        if (!isRewardToken[token]) {
+            isRewardToken[token] = true;
+            rewardTokens.push(token);
+        }
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        emit Distribute(token, minerIds, amounts);
+    }
+function pendingReward(
+        address account,
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[account][minerId];
+
+        return uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+    }
+function _checkRewardToken(address token) internal view {
+        if (!isRewardToken[token]) {
+            revert Staking__TokenIsNotRewardToken(token);
+        }
+    }
+function accTokenPerShare(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].accTokenPerShare[token];
+    }"
+129158,Staking.distribute,"Vulnerability: Incorrect Calculation of Reward Distribution in `distribute` Function
+
+The vulnerability lies within the `distribute` function related to how the `accTokenPerShare` is updated. The computation of `bribeReward` reduces the total `amount` distributed to miners, but when computing the `accTokenPerShare` adjustment, it ignores the reduced distribution due to the bribe.
+
+1. **Vulnerability Description**:
+    The `distribute` function is intended to distribute rewards among miners based on the stakes and bribes. However, the function updates `accTokenPerShare` based on bribeReward only, not considering the actual reward left for miners after substracting the bribe. This causes an unintentional high value of `accTokenPerShare` which benefits undeuly those who claim or unstake after distribution.
+
+2. **Exploitation Steps**:
+    a. Imagine there are multiple miners (`miner1`, `miner2`,...) staked in the system, with each having a certain amount that meets the `minimumStake`.
+    b. As a miner (say `miner1`), trigger or wait for other actions to increase your bribe.
+    c. Let an external `owner` address call the `distribute` function with tokens to distribute. In this function:
+       - `bribeReward = amount * bribe / 1e18` is computed.
+       - `miner.reward[token]` is increased by the amount left after subtracting `bribeReward`.
+       - `miner.bribedReward[token]` is increased by `bribeReward`.
+       - Importantly, `miner.accTokenPerShare[token]` is updated, incrementing it by `bribeReward * 1e18 / miner.amount`.
+    d. After distribution, the `accTokenPerShare` reflects a higher value than it should if the bribe part was properly accounted for in the distributed reward.
+    e. Any user claiming or unstaking after this distribution will see increased rewards based on the inflated `accTokenPerShare`.
+
+3. **Benefit for Exploiter**:
+    As `miner1`, by triggering the `claimStakerReward` after such faulty distribution, the rewards claimed would be higher due to the inflated `accTokenPerShare`. Miners staking after the distribution can also get more rewards when they unstake.
+
+4. **Correcting the Vulnerability**:
+    - Adjust the `bribeReward` calculation properly so that the `accTokenPerShare` update uses the actual post-bribe value for distributing rewards.
+    - Change the update line in `distribute` to:
+      ```
+      miner.accTokenPerShare[token] += (amount - bribeReward) * 1e18 / miner.amount;
+      ```
+    This would ensure the correct distribution scale accounting for bribes and prevent the rewards from inflating due to incorrect `accTokenPerShare` computations.","function bribedReward(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].bribedReward[token];
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function minerReward(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].reward[token];
+    }
+function claimMinerReward(
+        bytes12 gpuId,
+        address token
+    ) external override whenNotPaused nonReentrant {
+        bytes32 minerId = _getMinerId(msg.sender, gpuId);
+        MinerInfo storage miner = minerInfo[minerId];
+
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        uint256 reward = miner.reward[token];
+
+        if (reward == 0) {
+            revert Staking__NotEnoughRewardForMiner(msg.sender, gpuId, token);
+        }
+
+        IERC20(token).safeTransfer(msg.sender, reward);
+        miner.reward[token] = 0;
+
+        emit ClaimMinerReward(msg.sender, gpuId, token, reward);
+    }
+function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }
+function claimStakerReward(
+        bytes32 minerId,
+        address token
+    ) external override whenNotPaused nonReentrant {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+
+        int256 accumulatedToken = int256(
+            user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+        );
+        uint256 reward = uint256(accumulatedToken - user.rewardDebt[token]);
+
+        if (reward == 0) {
+            revert Staking__NotEnoughRewardForStaker(
+                msg.sender, minerId, token
+            );
+        }
+
+        user.rewardDebt[token] = accumulatedToken;
+
+        IERC20(token).safeTransfer(msg.sender, reward);
+
+        emit ClaimStakerReward(msg.sender, minerId, token, reward);
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }
+function distribute(
+        address token,
+        bytes32[] calldata minerIds,
+        uint256[] calldata amounts
+    ) external override onlyOwner nonReentrant {
+        uint256 numMinerIds = minerIds.length;
+        uint256 totalAmount;
+        uint256 amount;
+        uint256 bribe;
+
+        for (uint256 i = 0; i < numMinerIds; ++i) {
+            MinerInfo storage miner = minerInfo[minerIds[i]];
+
+            if (miner.amount < minimumStake) {
+                continue;
+            }
+
+            amount = amounts[i];
+
+            bribe = miner.bribe;
+
+            if (bribe < minimumBribe) {
+                bribe = minimumBribe;
+            }
+
+            uint256 bribeReward = amount * bribe / 1e18;
+
+            miner.reward[token] += (amount - bribeReward);
+            miner.bribedReward[token] += bribeReward;
+            miner.accTokenPerShare[token] += bribeReward * 1e18 / miner.amount;
+
+            totalAmount += amount;
+        }
+
+        if (!isRewardToken[token]) {
+            isRewardToken[token] = true;
+            rewardTokens.push(token);
+        }
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        emit Distribute(token, minerIds, amounts);
+    }
+function pendingReward(
+        address account,
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[account][minerId];
+
+        return uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+    }
+function _checkRewardToken(address token) internal view {
+        if (!isRewardToken[token]) {
+            revert Staking__TokenIsNotRewardToken(token);
+        }
+    }
+function accTokenPerShare(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].accTokenPerShare[token];
+    }"
+129185,Staking.pendingReward,"The identified exploit relates to the arithmetic operation calculation of the pending reward in the `pendingReward` function due to the lack of consideration for underflow in subtractive operations. This exploit is particularly related to the subtraction operation executed in computing the pending rewards:
+
+```solidity
+return uint256(
+    int256(
+        user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+    ) - user.rewardDebt[token]
+);
+```
+
+### Vulnerability Description:
+
+The exploit originates from the subtraction of `user.rewardDebt[token]` from the computed reward amount `(user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18)`. Given that all numbers are positive and under the assumption that safe math (which prevents overflow) is in use, the potential issue here is an underflow. Solidity versions prior to 0.8.0 do not automatically revert on underflow or overflow. If the calculated reward (before subtracting `user.rewardDebt[token]`) is less than `user.rewardDebt[token]`, this subtraction would lead to an underflow, potentially resulting in an extremely large value due to how underflows work in computation - flipping bits due to subtraction that goes below zero.
+
+### Step-by-Step Exploit:
+
+1. **Initial Setup by User:** An attacker (or in this context, a miner or stakeholder) registers a miner ID and stakes an amount in a specific reward token, accruing a certain `user.rewardDebt[token]` over time based on the contract's reward logic outside of the provided code snippet.
+   
+2. **Decrease in Accrued Token Per Share:** Due to changes in the contract's state or the underlying economics (e.g., a decrease in the total amount of staked tokens or accumulated rewards that lowers the `minerInfo[minerId].accTokenPerShare[token]`), the calculation of the user's reward (before subtracting the `rewardDebt`) becomes less than the user's accrued `rewardDebt`.
+
+3. **Calling `pendingReward`:** The user now calls the `pendingReward` function to check their reward.
+
+4. **Underflow Exploitation:** During the execution of `pendingReward`, when the subtraction occurs, if the amount to be subtracted (`user.rewardDebt[token]`) is greater than the calculated reward, an underflow occurs. Given the contract's lack of checks against this case and assuming SafeMath is not used for this specific operation or the contract is compiled with a Solidity version earlier than 0.8.0 (which does not have built-in overflow/underflow protection), the result of this underflow is a very large number. This means the user could potentially be shown (and might attempt to claim, depending on the rest of the contract's logic) a hugely inflated reward.
+
+### Solution:
+
+To mitigate this vulnerability, the contract must incorporate checks to ensure that the subtraction does not lead to an underflow. This can be done by ensuring that the value from which we're subtracting is always greater than or equal to the value being subtracted. In Solidity 0.8.0 and above, this is automatically handled unless explicitly opted out with unchecked blocks. For contracts compiled with versions earlier than 0.8.0, using the SafeMath library for subtraction is necessary to prevent this issue:
+
+```solidity
+// Using SafeMath for subtraction
+return uint256(
+    int256(
+        user.amount.mul(minerInfo[minerId].accTokenPerShare[token]).div(1e18)
+    ).sub(user.rewardDebt[token]) // SafeMath's sub function reverts on underflow
+);
+```
+
+Alternatively, if the contract is using Solidity 0.8.0 or newer, ensure explicit checks or logical guarantees prevent the scenario where `rewardDebt` could be higher than the computed reward, thus avoiding an underflow implicitly by the nature of the Solidity version's built-in checks.","function _checkRewardToken(address token) internal view {
+        if (!isRewardToken[token]) {
+            revert Staking__TokenIsNotRewardToken(token);
+        }
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function pendingReward(
+        address account,
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[account][minerId];
+
+        return uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+    }"
+129187,Staking.pendingReward,"The vulnerability in the code revolves around the calculation of `pendingReward` and the handling of the `rewardDebt[token]` for a user. Specifically, the code utilizes `rewardDebt[token]` in the calculation of the pending reward without ensuring that this variable cannot lead to unintended token generation or deduction for the user. 
+
+Here’s a step-by-step analysis of how the vulnerability can be exploited:
+
+1. **Initial Setup**: The user stakes an initial amount in the system, which gets recorded in their `userInfo[account][minerId].amount`, and their `userInfo[account][minerId].rewardDebt[token]` is updated based on the `minerInfo[minerId].accTokenPerShare[token]` at the time of staking.
+
+2. **Manipulation Opportunity**: If the user withdraws all stakes or a significant portion and then re-stakes a smaller amount (or performs actions that lead to a reduction in the `amount` they have staked), their `rewardDebt[token]` might remain significantly high relative to their new `amount * minerInfo[minerId].accTokenPerShare[token] / 1e18`, depending on how the `accTokenPerShare[token]` value has changed.
+
+3. **Exploiting the Calculation**: When calculating `pendingReward`, the formula is:
+   ```
+   uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+   ```
+   Given the `rewardDebt[token]` is subtracted from the `user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18`, if the `rewardDebt[token]` somehow (through the manipulation outlined above) ends up being higher than it should be relative to the user's current stake, the user could theoretically manipulate their stakes and the timing of their actions to cause this subtraction to come out negative, which is then cast to a `uint256`.
+
+4. **The Exploit's Core**: The key to this exploit lies in manipulating the relative values of `rewardDebt[token]` and the user’s effective stake value (`user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18`). An attacker can increase their `rewardDebt[token]` by staking a large amount when the `accTokenPerShare[token]` is high, then withdrawing and restaking a smaller amount when the `accTokenPerShare[token]` has not increased significantly. This manipulation could lead to a scenario where their pending rewards calculation underflows because of the cast from `int256` to `uint256`, unexpectedly increasing their rewards by a large amount due to how underflows/overflows work in Solidity (with underflow behavior producing large values when casting from signed to unsigned integers).
+
+To correct this vulnerability, it is crucial to ensure that the calculation of pending rewards cannot under any circumstances lead to underflows (or overflows, though that is not the particular case here). A potential fix would be to add checks to ensure that the subtraction does not result in a negative number before performing the cast to `uint256`, and if it does, the contract should handle it appropriately (for instance, by setting the pending reward to 0 in such cases). Additionally, a more thorough validation process for updates to `rewardDebt[token]` and `user.amount` could prevent the manipulation of these values in a way that would facilitate this exploit.","function _checkRewardToken(address token) internal view {
+        if (!isRewardToken[token]) {
+            revert Staking__TokenIsNotRewardToken(token);
+        }
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function pendingReward(
+        address account,
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[account][minerId];
+
+        return uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+    }"
+129190,Staking.pendingReward,"The vulnerability in question arises from the manner in which the `pendingReward` function calculates a user's rewards based on their `amount` staked and the accumulated rewards per share (`accTokenPerShare[token]`), and how it subtracts `user.rewardDebt[token]` from this value. This scheme is meant to ensure that users only get rewards for the amount of tokens they have actively staked in the period since their last reward calculation. The logical flaw here, though, stems from the potential for an underflow in the calculation of rewards.
+
+### The Vulnerability:
+The specific vulnerability is related to the calculation of pending rewards, particularly the subtraction of `user.rewardDebt[token]` from the product of `user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18`. When the result of the multiplication and division is less than `user.rewardDebt[token]`, it results in an underflow.
+
+Solidity (the programming language of the given contract) ensures arithmetic operations are safe and will revert on errors like overflows and underflows. However, the context provided states that safemath is in use, which suggests a version of Solidity 0.8.x or above isn't necessarily being utilized or that it's a manual prevention. Yet, the issue at hand is not prevented by safemath under all conditions but depends on how calculations are structured and utilized.
+
+### How to Exploit:
+
+1. A user (let's call them Alice) stakes a certain amount in a miner, associating with a particular `minerId` and `token`. Alice receives `accTokenPerShare[token]` as per her staking.
+
+2. Over time, `accTokenPerShare[token]` increases as the smart contract distributes rewards based on the staking pool's performance.
+
+3. At a certain point, Alice performs an action (like staking more or withdrawing a small amount) that triggers the update of her `rewardDebt[token]` based on the then-current `accTokenPerShare[token]`. This update could significantly increase `rewardDebt` if `accTokenPerShare` has increased substantially since her last interaction.
+
+4. If, after this update, the reward accumulation rate significantly slows down or decreases for any reason (e.g., lower overall rewards or an increase in the total staked amount by others diluting individual shares), the next calculation of Alice's pending rewards might involve her new, higher `rewardDebt[token]` being subtracted from a smaller product of her `amount * accTokenPerShare[token] / 1e18`, potentially resulting in an underflow (if safemath or similar protections are not implemented for subtraction) or a revert (if such protections are present, indicating an arithmetic error).
+
+5. However, exploiting this would depend on the contract's reaction to underflows or errors in arithmetic operations. If it silently allows negative outcomes (interpreted as very large positive numbers due to underflow) without revert, an attacker could request withdrawal or claim of rewards based on this erroneously large number, depleting the contract's token reserves illicitly. Yet, this relies on the contract not adequately handling arithmetic operation errors or the broader context allowing such a flawed withdrawal/claim.
+
+### Correction:
+To rectify this flaw, the contract must ensure that it checks for conditions that might lead to underflows explicitly or use a version of Solidity (0.8.x or above) that has these checks built in. Additionally, it could implement logic to set a user's pending reward to 0 (or revert) if the calculation of rewards minus `rewardDebt` would be negative, thus preventing malicious exploitation or unintentional errors from leading to undue reward claims. 
+
+Hence, a possible code adjustment could be before the final return in `pendingReward`:
+
+```solidity
+uint256 calculatedReward = uint256(int256(user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18) - user.rewardDebt[token]);
+if (calculatedReward < 0) {
+    revert(""Staking__InvalidRewardCalculation"");
+}
+return calculatedReward;
+```
+This code example assumes the contract environment either automatically prevents or checks for underflows, or that `calculatedReward` can be validated to prevent negative outcomes. For environments where this isn't the case, further adjustments ensuring non-negative outcomes or manual safemath implementations for subtraction would be required.","function _checkRewardToken(address token) internal view {
+        if (!isRewardToken[token]) {
+            revert Staking__TokenIsNotRewardToken(token);
+        }
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function pendingReward(
+        address account,
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        _checkMinerId(minerId);
+        _checkRewardToken(token);
+
+        UserInfo storage user = userInfo[account][minerId];
+
+        return uint256(
+            int256(
+                user.amount * minerInfo[minerId].accTokenPerShare[token] / 1e18
+            ) - user.rewardDebt[token]
+        );
+    }"
+128864,EsHEU.setPenaltyMultiplier,"### Vulnerability Detail
+
+The logical vulnerability exists in the `_calcClaimAmount` and `claim` functions regarding how early withdrawal penalties are calculated and subsequently handled. 
+
+The core issue lies in how the `penalty` is added back to the `amount` if a penalty is applicable (i.e., when the claim is made before the vesting period has ended). Here's the problematic part:
+
+```solidity
+if (penalty > 0) {
+    amount += penalty;
+}
+```
+
+In essence, this operation creates an illogical scenario where the `penalty` is not truly acting as a deterrent against early withdrawal, but rather, it inflates the amount being claimed prematurely, arguably rewarding users for claiming ahead of the vesting schedule.
+
+### How to Exploit the Vulnerability
+
+1. **Preparation**: Assume that a user has a vested amount (`vestAmount`) subject to a particular vesting schedule defined by a start (`info.start`) and end (`info.end`) timestamp.
+
+2. **Executing the Claim with a Partial Vesting Period Elapsed**: Let's say a significant portion, but not all, of the vesting period has elapsed. According to `_calcClaimAmount`, the `amount` they are entitled to at this point is less than `vestAmount` since `block.timestamp < info.end`. A `penalty` on the unvested portion is calculated.
+
+3. **Amount Inflation**: Instead of reducing the user's proceeds to emulate a penalty, the calculated `penalty` is added back to `amount`, artificially increasing the total claim amount.
+
+4. **Claiming More Than Entitled**: When the user calls `claim`, they inadvertently receive more than what they should be entitled to at that point in time. This includes an undue portion of the vested amount, adjusted by the penalty mechanism which paradoxically increases their claim.
+
+### Why This is Problematic
+
+This flaw allows users to claim more tokens than they should be able to based on their vesting schedule and the current time, essentially nullifying the deterrent effect of the penalty and potentially endangering the token's economic model.
+
+### Corrective Measure
+
+The logical step is to not add the penalty back to the `amount`. Instead, the penalty should be deducted or simply recorded without inflating the original claimable amount. The corrected part of the `_calcClaimAmount` function should rather have:
+
+```solidity
+if (penalty > 0) {
+    // Penalize by reducing the claimable amount, or handle the penalty separately without increasing `amount`
+}
+```
+
+Additionally, ensuring that the penalty operates as intended (dissuading early claims by reducing net proceeds) is vital. Penalties must be subtracted from the claimable amount or properly allocated to disincentivize early withdrawal rather than mistakenly rewarding it.","function setPenaltyMultiplier(uint256 newMultiplier)
+        external
+        override
+        onlyOwner
+    {
+        if (newMultiplier > 1e18) {
+            revert EsHEU__PenaltyMultiplierIsInvalid();
+        }
+
+        penaltyMultiplier = newMultiplier;
+
+        emit SetPenaltyMultiplier(newMultiplier);
+    }
+function _exchangeRate() internal view returns (uint256) {
+        uint256 totalHEU = heu.balanceOf(address(this));
+        uint256 totalSupply = totalSupply();
+
+        if (totalHEU == 0 || totalSupply == 0) {
+            return 1e18;
+        }
+
+        return totalHEU * 1e18 / totalSupply;
+    }
+function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount, uint256 penalty)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        uint256 vestAmount = info.amount;
+
+        if (vestAmount == 0) {
+            revert EsHEU__NoVestForId();
+        }
+
+        if (block.timestamp >= info.end) {
+            amount = vestAmount;
+        } else {
+            amount = vestAmount * (block.timestamp - info.start)
+                / (info.end - info.start);
+            penalty = (vestAmount - amount) * penaltyMultiplier / 1e18;
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+
+        if (penalty > 0) {
+            amount += penalty;
+        }
+    }
+function claim(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 amount, uint256 heuAmount, uint256 penalty)
+    {
+        (amount, heuAmount, penalty) = _calcClaimAmount(id);
+
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        if (info.amount > amount) {
+            info.amount -= amount;
+            info.start = block.timestamp;
+        } else {
+            delete vestInfo[msg.sender][id];
+        }
+
+        heu.safeTransfer(msg.sender, heuAmount);
+        _burn(address(this), amount);
+
+        emit Claim(id, amount, heuAmount, penalty);
+    }"
+129008,StHEU.vest,"The exploitable logical vulnerability in the provided code lies in the `_exchangeRate` function and how it's used within the `claim` function, specifically in the calculation of `heuAmount` when a user claims their vested tokens.
+
+### Vulnerability Explanation:
+
+The `_exchangeRate` function calculates the exchange rate based on the total HEU (a token, presumably) balance of the contract (`totalHEU`) and the `totalSupply` of another metric or token. The exchange rate aims to determine how many HEU tokens one would get per unit of the token that's being vested and subsequently claimed.
+
+The formula used is: `exchangeRate = totalHEU * 1e18 / totalSupply`.
+
+The vulnerability arises from how this exchange rate directly impacts the `heuAmount` during a claim operation in `_calcClaimAmount`. Specifically, `heuAmount = amount * _exchangeRate() / 1e18;`. Since the exchange rate could greatly vary depending on the `totalHEU` and `totalSupply`, an attacker can exploit situations where the `totalHEU` significantly increases or the `totalSupply` decreases after they have vested their tokens.
+
+### Exploit Steps:
+
+1. **Low Exchange Rate Vesting:** The attacker vests a significant amount of tokens at a time when the `_exchangeRate` is low, meaning `totalHEU` is low relative to `totalSupply`. Thus, they lock in a large quantity of tokens that will be subject to recalculated rates at the time of claiming.
+
+2. **Inflate `totalHEU`:** Before claiming, the attacker ensures that `totalHEU` on the contract is significantly increased. This can be achieved by transferring HEU tokens to the contract address without corresponding increases in `totalSupply`. There could be various strategies for achieving this, such as using other functionalities within the contract that indirectly add HEU to its balance.
+
+3. **Claim with High `totalHEU`:** The attacker then proceeds to claim their vested tokens. Due to the significant increase in `totalHEU`, the `_exchangeRate` is now much higher. This results in a substantially higher `heuAmount` being calculated and transferred to the attacker than what would have been fair or intended based on their initial vested amount.
+
+4. **Resulting Exploit:** By manipulating the exchange rate, the attacker is able to extract more HEU tokens from the contract than the fair share related to the original vested amount, effectively draining resources from the contract and other users who have a vested interest.
+
+### Fix Proposal:
+
+To mitigate this vulnerability, a fixed exchange rate should be established at the time of vesting and stored in the `VestInfo` structure for each vest operation. This fixed rate would then be used when calculating `heuAmount` during claims, ensuring that fluctuations in the `totalHEU` or `totalSupply` after vesting do not impact the amount of HEU tokens released during claims.
+
+This would involve modifying the `VestInfo` structure to include the `exchangeRate` at the time of vesting and adjusting the `_calcClaimAmount` method to use this stored rate instead of recalculating it during claim operations.","function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert StHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+        uint256 period = migrationMode ? 0 : vestPeriod;
+
+        vestInfo[msg.sender][id] = VestInfo(amount, block.timestamp + period);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, period);
+    }
+function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        amount = info.amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+        if (block.timestamp < info.end && !migrationMode) {
+            revert StHEU__CanNotClaimEarlier();
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+    }
+function cancelVest(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        uint256 amount = vestInfo[msg.sender][id].amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+
+        _transfer(address(this), msg.sender, amount);
+
+        delete vestInfo[msg.sender][id];
+
+        emit CancelVest(id, amount);
+    }
+function _exchangeRate() internal view returns (uint256) {
+        uint256 totalHEU = heu.balanceOf(address(this));
+        uint256 totalSupply = totalSupply();
+
+        if (totalHEU == 0 || totalSupply == 0) {
+            return 1e18;
+        }
+
+        return totalHEU * 1e18 / totalSupply;
+    }
+function claim(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 heuAmount)
+    {
+        uint256 amount;
+
+        (amount, heuAmount) = _calcClaimAmount(id);
+
+        delete vestInfo[msg.sender][id];
+
+        heu.safeTransfer(msg.sender, heuAmount);
+        _burn(address(this), amount);
+
+        emit Claim(id, heuAmount);
+    }"
+129089,Staking.setMinimumStake,"The exploitable code vulnerability lies within the `distribute` function. Specifically, the issue arises from the updating logic of `miner.accTokenPerShare[token]` during the distribution of rewards:
+
+```solidity
+miner.accTokenPerShare[token] += bribeReward * 1e18 / miner.amount;
+```
+
+Here's how the vulnerability can be exploited:
+
+### Step-by-Step Exploit:
+
+1. **Preparation**: An attacker first ensures there's a miner (the target for exploitation) with a relatively low staked amount, for simplicity, let's say 1 token. This miner meets the `minimumStake` requirement.
+
+2. **Initial Bribe**: The attacker then proceeds to call `distribute` with a small `amount` and a nonzero `bribe`, ensuring that `bribe` meets or exceeds `minimumBribe`. This initial bribe is to make sure `accTokenPerShare[token]` for that miner gets updated with a significantly high value due to the division by a small `miner.amount` (1 token in this case), maximizing the `accTokenPerShare`.
+
+3. **Exploitation**: After this manipulation, the attacker stakes a large amount into the same minerId, significantly increasing the `miner.amount`. However, since `accTokenPerShare[token]` has been inflated in the previous step due to the low initial stake, the user's `rewardDebt` for each token becomes enormously high.
+
+4. **Reaping Unfair Rewards**: Whenever rewards are distributed henceforth, the attacker benefits disproportionately due to the inflated `rewardDebt`. The high `rewardDebt` ensures they get a larger share of the distributed rewards, regardless of the actual amount staked by them or others after the manipulation.
+
+5. **Unstaking and Restaking Loophole**: The attacker might unstake some amount and restake to adjust his position beneficially based on new reward distributions and `accTokenPerShare[token]` adjustments in future distributions to maximize gains further.
+
+### Vulnerability Detail and Correction:
+
+This vulnerability is logical and arises due to the fractional division causing `accTokenPerShare[token]` to be drastically inflated when `miner.amount` is low, allowing an attacker to manipulate the system for disproportionate rewards.
+
+**Correction**:
+
+One approach to mitigate this vulnerability involves ensuring that adjustments to `accTokenPerShare[token]` do not result in disproportionate increases due to very low `miner.amount`. This could be achieved by reconsidering the reward distribution mechanism, introducing a floor to the miner's amount in calculations, or dynamically adjusting rewards in a less fractional-dependent manner.
+
+Another approach could be to update the `accTokenPerShare[token]` calculation to be weighted by the duration or size of stake, thus preventing disproportionate influence by manipulating the timing and amount of staking and distribution.
+
+Implementing a mechanism that averages out the `accTokenPerShare[token]` increase over a more extended period or based on a more stable metric than immediate `miner.amount` could also help prevent this exploit.
+
+Each suggested correction requires careful consideration of the contract's economics and goals to avoid introducing new vulnerabilities or imbalances.","function setMinimumStake(uint256 newMinimumStake)
+        external
+        override
+        onlyOwner
+    {
+        minimumStake = newMinimumStake;
+
+        emit SetMinimumStake(newMinimumStake);
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }
+function distribute(
+        address token,
+        bytes32[] calldata minerIds,
+        uint256[] calldata amounts
+    ) external override onlyOwner nonReentrant {
+        uint256 numMinerIds = minerIds.length;
+        uint256 totalAmount;
+        uint256 amount;
+        uint256 bribe;
+
+        for (uint256 i = 0; i < numMinerIds; ++i) {
+            MinerInfo storage miner = minerInfo[minerIds[i]];
+
+            if (miner.amount < minimumStake) {
+                continue;
+            }
+
+            amount = amounts[i];
+
+            bribe = miner.bribe;
+
+            if (bribe < minimumBribe) {
+                bribe = minimumBribe;
+            }
+
+            uint256 bribeReward = amount * bribe / 1e18;
+
+            miner.reward[token] += (amount - bribeReward);
+            miner.bribedReward[token] += bribeReward;
+            miner.accTokenPerShare[token] += bribeReward * 1e18 / miner.amount;
+
+            totalAmount += amount;
+        }
+
+        if (!isRewardToken[token]) {
+            isRewardToken[token] = true;
+            rewardTokens.push(token);
+        }
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        emit Distribute(token, minerIds, amounts);
+    }
+function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }"
+129137,Staking.unstake,"The vulnerability in the provided code snippet lies within the `_unstake` function, particularly in the mechanism used to update the `user.rewardDebt` for each reward token. The logic flaw is related to the potential for an integer underflow, which occurs in this line:
+
+```solidity
+user.rewardDebt[token] -= int256(amount * miner.accTokenPerShare[token] / 1e18);
+```
+
+### Description of the Vulnerability:
+
+Solidity smart contracts, especially in versions prior to 0.8.0, are susceptible to arithmetic underflows and overflows. While the description mentions safemath is in use, implying such overflow/underflow issues are handled for unsigned integers, the critical operation here casts the result to an `int256`. Safemath libraries typically do not handle signed integers, which reintroduces a vulnerability if the casted value is negative and the current `user.rewardDebt[token]` is not large enough in absolute terms to offset the deduction. 
+
+Resulting from an underflow, `user.rewardDebt[token]` could become extremely large positive value when it's supposed to be lowered, due to how underflow operations circle back from the lowest negative number to the maximal positive value in signed integers. This misalignment exposes an exploitable logic flaw.
+
+### Step-by-Step Exploitation:
+
+Assume an attacker has a standing stake and has accrued some amount of `rewardDebt` in a negative value due to how rewards are accounted and distributed. 
+
+1. **Establish a Negative Reward Debt:** The attacker participates in staking to the extent that the `rewardDebt[token]` for at least one token becomes negative. This might occur naturally through the normal staking and reward distribution mechanism of the contract.
+   
+2. **Exploit During Unstake:** The attacker initiates an unstake operation with an `amount` that, when the calculation `int256(amount * miner.accTokenPerShare[token] / 1e18)` is made, the product is a value that, when subtracted from the current negative `user.rewardDebt[token]`, causes an underflow. This is feasible because `user.rewardDebt[token]` is a signed integer, and the calculation could result in a subtraction that flips the sign due to underflow.
+
+3. **Result of the Underflow:** Instead of decreasing, the `user.rewardDebt[token]` becomes an extremely large positive number due to underflow. This could unjustly benefit the attacker in future reward calculations or distributions, essentially allowing them to claim more rewards than they are entitled to based on their actual staking contributions.
+
+### Mitigation:
+
+To address this vulnerability, the smart contract should ensure that operations involving signed integers, especially when downcasting from unsigned operations, are safe and consider potential underflows/overflows. One approach is to implement or use existing libraries that offer safemath-like protections for signed integers. More directly, the contract should validate that `user.rewardDebt[token]` can never become unintentionally large due to underflow by adding checks around operations that could result in underflow, ensuring that the subtraction should never proceed if the result would be less than the minimum possible value for `int256` or if it would change the sign in an unintended manner. 
+
+Explicitly, before adjusting `user.rewardDebt[token]`, the contract could compute the would-be result of the subtraction and verify that it does not result in an underflow, or perform the operation in such a way that underflow is prevented (for instance, by using safemath-like functions tailored for signed integers, factoring in the underflow check).","function unstake(
+        bytes32 minerId,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _unstake(minerId, amount, false);
+    }
+function _checkMinerId(bytes32 minerId) internal view {
+        if (minerInfo[minerId].account == address(0)) {
+            revert Staking__MinerIsNotRegistered();
+        }
+    }
+function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }"
+129213,Staking.accTokenPerShare,"The vulnerability in the provided smart contract code lies within the `_unstake` and `_stake` function implementations, specifically in how the `rewardDebt` for each user is updated. This vulnerability can lead to an exploit where a user can inflate their rewards unfairly.
+
+### Exploitable Vulnerability Detail:
+
+The exploitable vulnerability revolves around the incorrect updating of `user.rewardDebt` during the `_stake` and `_unstake` operations without proper scaling by `1e18` in the `_stake` function, as is done correctly in the `_unstake` function. This inconsistency can be exploited by an attacker to manipulate their owed rewards from the contract.
+
+### Step-by-step Exploit:
+
+1. **Initial Setup**: Assume the attacker has already staked a certain amount in a miner and has accumulated some amount of reward tokens due to some activity which results in `accTokenPerShare` being a non-zero positive number.
+
+2. **Performing Unstake**: The attacker decides to partially unstake their tokens. During the unstake operation (`_unstake` function), for each reward token, the contract correctly calculates the `rewardDebt` subtraction using the formula:
+  
+    ```
+    user.rewardDebt[token] -= int256(amount * miner.accTokenPerShare[token] / 1e18);
+    ```
+   
+   This correctly scales down the `accTokenPerShare` based on the amount being unstaked, properly reducing the `rewardDebt`.
+
+3. **Manipulating Stake**: After that, the attacker restakes the previously unstaked amount or possibly a different amount. During this operation (`_stake` function), the contract incorrectly updates the `rewardDebt` without dividing the product of `amount * miner.accTokenPerShare[token]` by `1e18`:
+   
+    ```
+    user.rewardDebt[token] += int256(amount * miner.accTokenPerShare[token]);
+    ```
+   
+   This causes the calculation to not be scaled correctly, differing from the unstake operation, leading to an inflated `rewardDebt`.
+
+4. **Resulting Discrepancy**: Due to the scaling inconsistency, restaking allows the attacker to increase their `rewardDebt` by a larger magnitude than what was subtracted during unstaking (assuming `accTokenPerShare` does not change significantly in the meantime). Since rewards to be claimed are calculated based on differences involving `rewardDebt`, this scaling discrepancy can allow an attacker to claim more rewards than they are fairly due.
+
+5. **Exploitation**: By repeating the unstake and restake process, an attacker could continually inflate their `rewardDebt`, allowing them to withdraw a disproportionate amount of rewards from the pool, affecting the fairness of reward distribution and potentially draining the rewards pool unfairly.
+
+### Corrective Measure:
+
+To correct this vulnerability, ensure consistency in how `rewardDebt` is updated during stake and unstake operations. Specifically, divide by `1e18` in the `_stake` function when updating `user.rewardDebt[token]`, similar to how it is done in the `_unstake` function:
+
+```solidity
+user.rewardDebt[token] += int256(amount * miner.accTokenPerShare[token] / 1e18);
+```
+
+This adjustment will ensure the calculations remain consistent between staking and unstaking, preventing exploitation through manipulated reward claims.","function _unstake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        if (user.amount < amount) {
+            revert Staking__ExceedsStakedAmount(
+                msg.sender, minerId, user.amount
+            );
+        }
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] -=
+                int256(amount * miner.accTokenPerShare[token] / 1e18);
+        }
+
+        user.amount -= amount;
+        miner.amount -= amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransfer(msg.sender, amount);
+        }
+
+        emit Unstake(msg.sender, minerId, amount);
+    }
+function unstake(
+        bytes32 minerId,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _unstake(minerId, amount, false);
+    }
+function restake(
+        bytes32 from,
+        bytes32 to,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _unstake(from, amount, true);
+        _stake(to, amount, true);
+    }
+function _stake(
+        bytes32 minerId,
+        uint256 amount,
+        bool isRestaking
+    ) internal {
+        _checkMinerId(minerId);
+
+        UserInfo storage user = userInfo[msg.sender][minerId];
+        MinerInfo storage miner = minerInfo[minerId];
+
+        uint256 numRewardTokens = rewardTokens.length;
+        address token;
+
+        for (uint256 i = 0; i < numRewardTokens; ++i) {
+            token = rewardTokens[i];
+
+            user.rewardDebt[token] +=
+                int256(amount * miner.accTokenPerShare[token]);
+        }
+
+        user.amount += amount;
+        miner.amount += amount;
+
+        if (!isRestaking) {
+            esHEU.safeTransferFrom(msg.sender, address(this), amount);
+        }
+
+        emit Stake(msg.sender, minerId, amount);
+    }
+function distribute(
+        address token,
+        bytes32[] calldata minerIds,
+        uint256[] calldata amounts
+    ) external override onlyOwner nonReentrant {
+        uint256 numMinerIds = minerIds.length;
+        uint256 totalAmount;
+        uint256 amount;
+        uint256 bribe;
+
+        for (uint256 i = 0; i < numMinerIds; ++i) {
+            MinerInfo storage miner = minerInfo[minerIds[i]];
+
+            if (miner.amount < minimumStake) {
+                continue;
+            }
+
+            amount = amounts[i];
+
+            bribe = miner.bribe;
+
+            if (bribe < minimumBribe) {
+                bribe = minimumBribe;
+            }
+
+            uint256 bribeReward = amount * bribe / 1e18;
+
+            miner.reward[token] += (amount - bribeReward);
+            miner.bribedReward[token] += bribeReward;
+            miner.accTokenPerShare[token] += bribeReward * 1e18 / miner.amount;
+
+            totalAmount += amount;
+        }
+
+        if (!isRewardToken[token]) {
+            isRewardToken[token] = true;
+            rewardTokens.push(token);
+        }
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        emit Distribute(token, minerIds, amounts);
+    }
+function stake(
+        bytes32 minerId,
+        uint256 amount
+    ) external override whenNotPaused nonReentrant {
+        _stake(minerId, amount, false);
+    }
+function accTokenPerShare(
+        bytes32 minerId,
+        address token
+    ) external view override returns (uint256) {
+        return minerInfo[minerId].accTokenPerShare[token];
+    }"
+128967,StHEU.setMigrationMode,"The exploitable vulnerability in the code is related to the `vest` function logic during the contract’s `migrationMode`. Specifically, it allows users to bypass the vesting period entirely, which is a critical lapse in the intended functionality when `migrationMode` is `true`.
+
+**Detailed Description of the Vulnerability**:
+In the `vest` function, if `migrationMode` is `true`, the `period` variable is set to `0` which means `VestInfo` gets assigned an end time of `block.timestamp`. Consequently, users can withdraw their funds immediately because there is no lock-up period enforced, directly conflicting with the purpose of a vesting schedule that should restrict the immediate availability of vested tokens.
+
+**Step-by-Step Exploitation**:
+1. The attacker discerns that the contract is in `migrationMode`.
+2. They call the `vest` function with a non-zero amount.
+3. Inside the `vest` function, since `migrationMode` is `true`, `period` is set to `0`.
+4. The `VestInfo` for the attacker's address and a new `id` is updated with an end timestamp equivalent to the current `block.timestamp`.
+5. As per `_calcClaimAmount` logic, since there is no future-dated lock (due to `block.timestamp` being equal to `info.end`), the vesting amount can be claimed immediately.
+6. The attacker initiates the claim right after vesting, essentially turning the vest action into an instant transaction without any vesting delay.
+
+**Security Implication**:
+This flaw erodes the integrity of the vesting process during migration phases when normally vested tokens should perhaps still respect certain timelock constraints to manage the token’s economy and prevent abuse such as immediate selling pressure or other manipulative activities.
+
+It might have been intended that during a migration, tokens could be moved or vested more freely -- but it still poses a considerable risk depending on the migration's purpose and mechanics. Moreover, allowing tokens to be immediately available entirely misconstrues the typical utility and governance safeguards provided by a vesting period.
+
+**Recommendation**:
+A reevaluation of the `migrationMode` logic in the `vest` function is essential. If instant access to funds during migration is not desired, maintaining a minimum `period` or restricting the ability to immediately vest and claim in `migrationMode` should be considered. Alternatively, adjusting the `migrationMode` functionality to provide different constraints (like partial vesting) instead of a zero-time period may also be apt depending on the exact requirements and risks evaluated.","function setMigrationMode(bool status) external override onlyOwner {
+        migrationMode = status;
+
+        emit SetMigrationMode(status);
+    }
+function _calcClaimAmount(uint256 id)
+        internal
+        view
+        returns (uint256 amount, uint256 heuAmount)
+    {
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        amount = info.amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+        if (block.timestamp < info.end && !migrationMode) {
+            revert StHEU__CanNotClaimEarlier();
+        }
+
+        heuAmount = amount * _exchangeRate() / 1e18;
+    }
+function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert StHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+        uint256 period = migrationMode ? 0 : vestPeriod;
+
+        vestInfo[msg.sender][id] = VestInfo(amount, block.timestamp + period);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, period);
+    }
+function lock(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        if (migrationMode) {
+            revert StHEU__CanNotLockInMigrationMode();
+        }
+        if (amount == 0) {
+            revert StHEU__LockAmountIsInvalid();
+        }
+
+        uint256 mintAmount = amount * 1e18 / _exchangeRate();
+
+        heu.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, mintAmount);
+
+        emit Lock(amount, mintAmount);
+    }"
+128992,StHEU.lock,"The exploitable vulnerability in the code revolves around the calculation of `mintAmount` in the `lock` function in relation to the `_exchangeRate` calculation within the `_exchangeRate` function. This logic flaw can enable an exploitable scenario particularly beneficial for an actor in terms of manipulating the minting rate to their advantage.
+
+### Vulnerability Detailed Description:
+The core of the vulnerability lies within the division by the `_exchangeRate` in the `lock` function for calculating the `mintAmount`. The `_exchangeRate` function is designed to return a rate based on the total HEU held by the contract versus the total supply of the contract’s tokens.
+
+A key detail here is that initially or in certain conditions (after large withdrawals or redemptions, for instance), the contract might be holding significantly fewer HEU tokens relative to the total supply of its own minted tokens. This is because the exchange rate formula fundamentally calculates the token's worth based on the contract's HEU holdings and its total supply.
+
+### Step-by-Step Exploit:
+
+1. **Preparation Phase**: Wait for or create a condition where the `totalHEU` balance of the contract is significantly lower compared to the `totalSupply` of the minted tokens. This can happen naturally over time or through specific actions that drain the HEU from the contract without reducing the total supply of the minted tokens proportionally.
+
+2. **Locking Phase**: At this moment of imbalance, an actor decides to `lock` a relatively small amount of HEU into the contract.
+
+3. **Exploitation Calculation**: Given that the `_exchangeRate` is calculated as `(totalHEU * 1e18) / totalSupply`, and assuming `totalHEU` is significantly less than `totalSupply`, the resulting `_exchangeRate` would be very low.
+
+4. **Resulting Mint Amount is Exaggerated**: When the actor locks their amount of HEU, due to the low exchange rate, the calculation `amount * 1e18 / _exchangeRate()` results in a disproportionately high `mintAmount`. This means that the actor receives more minted tokens than they should based on the actual value of HEU they locked.
+
+5. **Impact**: Over time, this actor exploits this logical flaw to accumulate a large portion of the minted tokens at an undervalued rate, therefore diluting the value of other holders’ tokens and potentially manipulating the token economy in their favor.
+
+### Correction:
+A proper balancing mechanism needs to be implemented to adjust the minting rate dynamically, based on both the `totalHEU` in the contract and external HEU market conditions or a fixed ratio should be maintained that does not solely rely on the `totalHEU` and `totalSupply` dynamic. A more robust and less exploitable approach could involve setting a minimum exchange rate floor to prevent the exploitation of the minting mechanism during periods of low HEU balance within the contract. Additionally, regular audits and adjustments based on real-world token dynamics and economics could help mitigate such vulnerabilities.","function _exchangeRate() internal view returns (uint256) {
+        uint256 totalHEU = heu.balanceOf(address(this));
+        uint256 totalSupply = totalSupply();
+
+        if (totalHEU == 0 || totalSupply == 0) {
+            return 1e18;
+        }
+
+        return totalHEU * 1e18 / totalSupply;
+    }
+function lock(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        if (migrationMode) {
+            revert StHEU__CanNotLockInMigrationMode();
+        }
+        if (amount == 0) {
+            revert StHEU__LockAmountIsInvalid();
+        }
+
+        uint256 mintAmount = amount * 1e18 / _exchangeRate();
+
+        heu.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, mintAmount);
+
+        emit Lock(amount, mintAmount);
+    }"
+128840,EsHEU.pause,"Vulnerability: The logical flaw exists in the `cancelVest` function.
+
+In the current implementation of the `cancelVest` function, a user can execute this function to cancel their vesting schedule and immediately retrieve the full amount of tokens that were initially vested without any time check constraint or penalty. Here's how the vulnerability can be exploited:
+
+### Step-by-Step Exploitation of Vulnerability:
+1. **Vesting Setup**: An account, say `Alice`, chooses to vest a certain amount of tokens. For instance, Alice vests 5000 tokens. According to the function `vest(uint256 amount)`, this gets recorded in the `vestInfo` for Alice with a start time and end time calculated based on the defined `vestPeriod`.
+
+2. **Immediate Vest Cancellation**:
+   - Shortly after vesting (even seconds or minutes), Alice calls `cancelVest(uint256 id)` with the `id` that was provided when she initially vested her tokens.
+   - The function `cancelVest` retrieves the vesting record and checks if `amount` in `vestInfo` exists. Given Alice has just created it without any external interference, the amount is still valid (non-zero).
+   - Since the function lacks any mechanism to check whether the vesting period was honored (i.e., whether enough time has passed from the initial vesting), Alice effectively bypasses the temporal constraints intended by a vesting mechanism.
+   - The full amount of 5000 tokens gets transferred back to Alice.
+
+3. **Result of the Exploit**:
+   - **No Time Constraint**: Alice manages to get all her vested tokens back immediately without having to wait for the vesting duration to lapse.
+   - **No Penalty**: There are no penalties imposed for not respecting the vesting time, leading to a potential undermining of the vesting rationale designed to ensure commitment.
+
+### Corrective Action:
+Implement a time check within the `cancelVest(uint256 id)` function that validates whether the current block timestamp is greater than or equal to the end time (i.e., `block.timestamp >= vestInfo[msg.sender][id].end`). If not, either block the cancellation or apply penalties/fees for early cancellation, which could then be burned or redistributed according to the tokenomics designed by the project. This change would uphold the integrity of vesting schedules by ensuring that vesting terms are honored, or a penalty is applied for non-adherence.","function pause() external override onlyOwner {
+        _pause();
+    }
+function lock(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        if (amount == 0) {
+            revert EsHEU__LockAmountIsInvalid();
+        }
+
+        uint256 mintAmount = amount * 1e18 / _exchangeRate();
+
+        heu.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, mintAmount);
+
+        emit Lock(amount, mintAmount);
+    }
+function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert EsHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+
+        vestInfo[msg.sender][id] =
+            VestInfo(amount, block.timestamp, block.timestamp + vestPeriod);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, vestPeriod);
+    }
+function cancelVest(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        uint256 amount = vestInfo[msg.sender][id].amount;
+
+        if (amount == 0) {
+            revert EsHEU__NoVestForId();
+        }
+
+        _transfer(address(this), msg.sender, amount);
+
+        delete vestInfo[msg.sender][id];
+
+        emit CancelVest(id, amount);
+    }
+function claim(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 amount, uint256 heuAmount, uint256 penalty)
+    {
+        (amount, heuAmount, penalty) = _calcClaimAmount(id);
+
+        VestInfo storage info = vestInfo[msg.sender][id];
+
+        if (info.amount > amount) {
+            info.amount -= amount;
+            info.start = block.timestamp;
+        } else {
+            delete vestInfo[msg.sender][id];
+        }
+
+        heu.safeTransfer(msg.sender, heuAmount);
+        _burn(address(this), amount);
+
+        emit Claim(id, amount, heuAmount, penalty);
+    }"
+128944,StHEU.pause,"The exploit can be found within the `claim` function due to a lack of verification that the vesting period has actually been completed before allowing the withdrawal of the vested HEU amount. The contract does not check if the current block's timestamp is greater than or equal to the vesting end time (`block.timestamp + period`) stored in `vestInfo[msg.sender][id].timestamp`, which would ensure that the vesting period has indeed ended. This omission can be exploited as follows:
+
+1. A user calls the `vest` function, specifying an `amount` to vest. This action creates a vest entry for the user with the current block's timestamp plus the vesting period (or `0` in migration mode).
+
+2. Immediately after vesting, without waiting for the specified `vestPeriod` to pass (or even if in migration mode where the period could be `0`), the user calls the `claim` function with the `id` of the recently created vest.
+
+3. Since the `claim` function does not verify that the vesting period is complete (i.e., it doesn't check if `block.timestamp` is greater than or equal to `vestInfo[msg.sender][id].timestamp`), the user is able to withdraw the `heuAmount` associated with the vest prematurely.
+
+4. This vulnerability allows users to bypass the vesting period entirely, rendering the concept of vesting ineffective. It can be exploited by simply vesting an amount and claiming it back immediately, without any regard to vesting durations set by the contract.
+
+To correct this vulnerability, the `claim` function should include a check to ensure that the current block's timestamp is greater than or equal to the vesting end timestamp (`vestInfo[msg.sender][id].timestamp`). If not, the function should revert. This check enforces the vesting period and prevents premature withdrawals, ensuring the integrity of the vesting mechanism.
+
+Here is a corrected version of the `claim` function with the necessary check added:
+
+```solidity
+function claim(uint256 id)
+    external
+    override
+    whenNotPaused
+    nonReentrant
+    returns (uint256 heuAmount)
+{
+    uint256 amount;
+
+    // Ensure that the vesting period has ended
+    if(block.timestamp < vestInfo[msg.sender][id].timestamp) {
+        revert(""Vesting period has not ended"");
+    }
+
+    (amount, heuAmount) = _calcClaimAmount(id);
+
+    delete vestInfo[msg.sender][id];
+
+    heu.safeTransfer(msg.sender, heuAmount);
+    _burn(address(this), amount);
+
+    emit Claim(id, heuAmount);
+}
+```
+This amendment implements a critical validation step, ensuring that the timeline for vesting cannot be bypassed, thereby preserving the integrity and intended functionality of the vesting mechanism.","function pause() external override onlyOwner {
+        _pause();
+    }
+function lock(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        if (migrationMode) {
+            revert StHEU__CanNotLockInMigrationMode();
+        }
+        if (amount == 0) {
+            revert StHEU__LockAmountIsInvalid();
+        }
+
+        uint256 mintAmount = amount * 1e18 / _exchangeRate();
+
+        heu.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, mintAmount);
+
+        emit Lock(amount, mintAmount);
+    }
+function vest(uint256 amount)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 id)
+    {
+        if (amount == 0) {
+            revert StHEU__VestAmountIsInvalid();
+        }
+
+        id = vestCount[msg.sender];
+        uint256 period = migrationMode ? 0 : vestPeriod;
+
+        vestInfo[msg.sender][id] = VestInfo(amount, block.timestamp + period);
+        vestCount[msg.sender] = id + 1;
+
+        _transfer(msg.sender, address(this), amount);
+
+        emit Vest(id, amount, period);
+    }
+function cancelVest(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+    {
+        uint256 amount = vestInfo[msg.sender][id].amount;
+
+        if (amount == 0) {
+            revert StHEU__NoVestForId();
+        }
+
+        _transfer(address(this), msg.sender, amount);
+
+        delete vestInfo[msg.sender][id];
+
+        emit CancelVest(id, amount);
+    }
+function claim(uint256 id)
+        external
+        override
+        whenNotPaused
+        nonReentrant
+        returns (uint256 heuAmount)
+    {
+        uint256 amount;
+
+        (amount, heuAmount) = _calcClaimAmount(id);
+
+        delete vestInfo[msg.sender][id];
+
+        heu.safeTransfer(msg.sender, heuAmount);
+        _burn(address(this), amount);
+
+        emit Claim(id, heuAmount);
+    }"
