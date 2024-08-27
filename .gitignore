@@ -1,0 +1,21 @@
+# Ignore .venv directory
+.venv
+
+# Ignore IDE files
+.idea/
+.vscode/
+
+# Ignore macOS files
+.DS_Store
+
+# Ignore Python project files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyz
+*.pyw
+*.pyi
+*.egg-info/
+dist/
+build/
