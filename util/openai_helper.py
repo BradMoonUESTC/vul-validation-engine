@@ -2,7 +2,7 @@ import requests
 import json
 
 class OpenAIHelper:
-    def __init__(self, api_key, api_base="api.openai.com"):
+    def __init__(self, api_key, api_base="api.openai.one"):
         self.api_key = api_key
         self.api_base = api_base
 

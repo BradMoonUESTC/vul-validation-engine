@@ -3,10 +3,13 @@ from agent.checker_agent import CheckerAgent
 from task.task import Task
 from util.openai_helper import OpenAIHelper
 from workflow.workflow import Workflow
+from rag.constructor import query_similar_functions
+import csv
 
 # 初始化 OpenAI 帮助类
-api_key = "your_openai_api_key_here"
-openai_helper = OpenAIHelper(api_key)
+api_key = "sk-d3i9QpUjDpMo7Qt1C6764388Eb784f7c94D70c904f121435"
+api_base="apix.ai-gaochao.cn"
+openai_helper = OpenAIHelper(api_key,api_base)
 
 # 定义基准任务Prompt
 BASE_PROMPT = """
@@ -46,7 +49,7 @@ BASE_PROMPT = """
 }
 11. 每个描述不应少于200个字，每个具体操作不应少于200个字
 """
-checker_agent = CheckerAgent(openai_helper=openai_helper)
+
 # 创建角色与任务
 analyzer = Agent(role="Analyzer", goal="生成详细的漏洞确认流程", openai_helper=openai_helper)
 investigator = Agent(role="Investigator", goal="根据确认流程检查漏洞是否存在", openai_helper=openai_helper)
@@ -54,8 +57,15 @@ investigator = Agent(role="Investigator", goal="根据确认流程检查漏洞�
 # 基于漏洞信息生成误报确认流程
 base_task = Task(description=BASE_PROMPT, expected_output="详细的JSON格式的确认流程")
 
+# 读取CSV文件
+def read_csv(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
 # 初始化工作流
-workflow = Workflow(agents=[analyzer, investigator], tasks=[base_task], contracts_dir="contracts/shanxuan", csv_file="vul_result.csv",checker_agent=checker_agent)
+csv_data = read_csv("vul_result.csv")
+workflow = Workflow(agents=[analyzer, investigator], tasks=[base_task], csv_data=csv_data, checker_agent=CheckerAgent(openai_helper))
 
 # 执行工作流并打印结果
 final_results = workflow.run()

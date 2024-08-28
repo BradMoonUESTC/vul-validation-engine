@@ -1,9 +1,19 @@
 
-
-from library.sgp.sgp_parser import get_antlr_parsing
-from library.parsing.callgraph import CallGraph
+import sys
 import os
-import re
+
+# 添加包含 'library' 的目录到 Python 路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
+print("Current working directory:", os.getcwd())
+print("Python path:", sys.path)
+print("Contents of current directory:", os.listdir(current_dir))
+print("Contents of parent directory:", os.listdir(parent_dir))
+
+from rag.library.sgp.sgp_parser import get_antlr_parsing
+from rag.library.parsing.callgraph import CallGraph
 class Function(dict):
     def __init__(self, file, contract, func):
         self.file = file
