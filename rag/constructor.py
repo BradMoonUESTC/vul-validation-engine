@@ -1,7 +1,5 @@
-import os
 import pickle
 import numpy as np
-from pathlib import Path
 from tqdm import tqdm
 import requests
 from sklearn.metrics.pairwise import cosine_similarity
@@ -64,6 +62,9 @@ def get_similar_functions(query_text, embeddings, metadata, top_k=5):
     
     results = []
     for idx in top_indices:
+        # sim = similarities[idx]
+        # if sim < 0.3:
+        #     break
         metadata_item = metadata[idx]
         results.append({
             'function_name': metadata_item['name'],
