@@ -50,14 +50,14 @@ if __name__ == "__main__":
     }
     11. 每个描述不应少于200个字，每个具体操作不应少于200个字
     """
-
+    print("创建角色与任务")
     # 创建角色与任务
     analyzer = Agent(role="Analyzer", goal="生成详细的漏洞确认流程", openai_helper=openai_helper)
     investigator = Agent(role="Investigator", goal="根据确认流程检查漏洞是否存在", openai_helper=openai_helper)
-
+    print("定义task，生成确认流程")
     # 基于漏洞信息生成误报确认流程
     base_task = Task(description=BASE_PROMPT, expected_output="详细的JSON格式的确认流程")
-
+    
     # 读取CSV文件
     def read_csv(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
