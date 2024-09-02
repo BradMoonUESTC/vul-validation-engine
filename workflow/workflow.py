@@ -1,6 +1,7 @@
 import json
 import csv
 import hashlib
+import traceback
 from datetime import datetime
 from rag.constructor import query_similar_functions
 from task.task import Task
@@ -73,7 +74,7 @@ class Workflow:
             print(f"Problematic JSON: {initial_result[:1000]}...")  # 打印前1000个字符用于调试
             raise  # 重新抛出异常，让上层的 run 方法捕获
 
-        final_result = {"漏洞描述": row['漏洞结果'], "漏洞": False, "检查步骤": []}
+        final_result = {"漏洞描述": row['漏洞结果'], "漏洞": True, "检查步骤": []}
         self.execute_steps(steps, final_result, hash_value)
         return final_result
 
@@ -120,16 +121,17 @@ class Workflow:
                     print(f"Next step suggestion: {next_steps}")
                     self.log_to_csv("Next Step Suggestion", "", str(next_steps), hash_value)
             else:
-                final_result["漏洞"] = True
-                print("Vulnerability confirmed. Stopping execution.")
-                self.log_to_csv("Execution Result", "", "Vulnerability confirmed", hash_value)
-                return
+                raise ValueError(f"Invalid check result: {step_result['检查结果']}")
+                # final_result["漏洞"] = True
+                # print("Vulnerability confirmed. Stopping execution.")
+                # self.log_to_csv("Execution Result", "", "Vulnerability confirmed", hash_value)
+                # return
 
         # 如果所有步骤都执行完毕，但没有明确结论，则视为潜在漏洞
-        if final_result["漏洞"] is False:
-            final_result["漏洞"] = True
-            print("All steps completed without confirming false positive. Considering as potential vulnerability.")
-            self.log_to_csv("Execution Result", "", "Potential vulnerability - no clear false positive confirmation", hash_value)
+        # if final_result["漏洞"] is False:
+        #     final_result["漏洞"] = True
+        #     print("All steps completed without confirming false positive. Considering as potential vulnerability.")
+        #     self.log_to_csv("Execution Result", "", "Potential vulnerability - no clear false positive confirmation", hash_value)
 
     def generate_inner_steps(self, step_result, hash_value):
         prompt = f"""
