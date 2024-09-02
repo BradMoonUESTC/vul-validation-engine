@@ -8,7 +8,8 @@ import csv
 if __name__ == "__main__":
 
     # 初始化 OpenAI 帮助类
-    api_key = "sk-d3i9QpUjDpMo7Qt1C6764388Eb784f7c94D70c904f121435"
+    # api_key = "sk-d3i9QpUjDpMo7Qt1C6764388Eb784f7c94D70c904f121435"
+    api_key = "sk-hQfski4aO06WQD0jF442Da78D4Ef4f758c678aC095Dc0a9b"
     api_base="apix.ai-gaochao.cn"
     openai_helper = OpenAIHelper(api_key,api_base)
 
